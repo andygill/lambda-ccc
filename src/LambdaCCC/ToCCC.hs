@@ -1,5 +1,7 @@
 {-# LANGUAGE TypeOperators, GADTs, PatternGuards, ScopedTypeVariables #-}
-{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE ConstraintKinds, RankNTypes, CPP #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wall #-}
 
 -- {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
@@ -17,81 +19,136 @@
 -- Convert lambda expressions to CCC combinators
 ----------------------------------------------------------------------
 
-module LambdaCCC.ToCCC (toCCC) where
+module LambdaCCC.ToCCC (toCCC, toCCC' {-, HasLambda(..) -}) where
+
+import Prelude hiding (id,(.),curry,uncurry,const,not,and,or)
 
 import Data.Functor ((<$>))
 import Control.Monad (mplus)
 import Data.Maybe (fromMaybe)
 
-import Data.IsTy
 import Data.Proof.EQ
 
+-- #define PlainConvert
+
 import LambdaCCC.Misc
-import LambdaCCC.CCC
-import LambdaCCC.Ty
-import LambdaCCC.Lambda
+import LambdaCCC.Lambda (E(..),V,Pat(..))
+import Circat.Category
 
 {--------------------------------------------------------------------
     Conversion
 --------------------------------------------------------------------}
 
--- -- | Rewrite a lambda expression via CCC combinators
--- toCCC' :: E a -> (Unit :-> a)
--- toCCC' a | HasTy <- expHasTy a
---          = convert UnitPat a
+#ifdef PlainConvert
 
-toCCC :: E (a :=> b) -> (a :-> b)
-toCCC e | (HasTy,HasTy) <- funTyHasTy (expTy e) = to' e
+-- | Rewrite a lambda expression via CCC combinators
+toCCC :: BiCCCC k p => E p a -> (Unit `k` a)
+toCCC e = convert e UnitPat
 
-to' :: HasTy2 a b => E (a :=> b) -> (a :-> b)
-to' (Lam p e) = convert p e
-to' e = to' (Lam vp (e :^ ve))
- where
-   (vp,ve) = vars "ETA"
+-- toCCC :: forall p a. E p a -> forall k. BiCCCC k p => (Unit `k` a)
 
 -- | Convert @\ p -> e@ to CCC combinators
-convert :: forall a b. HasTy2 a b =>
-           Pat a -> E b -> (a :-> b)
-convert _ (ConstE o _) = Const o
-convert k (Var v) = fromMaybe (error $ "convert: unbound variable: " ++ show v) $
-                    convertVar v k
-convert k (u :^ v)   | HasTy <- tyHasTy (domTy (expTy u))
-  = applyE @. (convert k u &&& convert k v)
-convert k (Lam p e)  | (HasTy,HasTy) <- tyHasTy2 (patTy p) (expTy e)
-                     = curryE (convert (k :# p) e)
--- convert k (Case (a,p) (b,q) ab) =
---   (convert (k :# a) p ||| convert (k :# b) q) . distl . (Id &&& convert k ab)
-
--- convert k (Either f g)
---   | (HasTy,HasTy) <- funTyHasTy (expTy f), HasTy <- tyHasTy (domTy (expTy g))
---   = curryE ((uncurryE (convert k f) ||| uncurryE (convert k g)) @. distl)
-
-convert k (Either f g)
-  | (HasTy,HasTy) <- funTyHasTy (expTy f), HasTy <- tyHasTy (domTy (expTy g))
-  = curryE ((convert' f ||| convert' g) @. distl)
+convert :: forall a b prim k. BiCCCC k prim =>
+           E prim b -> Pat a -> (a `k` b)
+convert (ConstE x)   _ = unitArrow x . it
+convert (Var v)      p = convertVar v p
+convert (u :^ v)     p = apply . (convert u p &&& convert v p)
+convert (Lam q e)    p = curry (convert e (p :# q))
+convert (Either f g) p = curry ((convert' f ||| convert' g) . ldistribS)
  where
-   convert' :: HasTy2 p q => E (p :=> q) -> (a :* p :-> q)
-   convert' h = uncurryE (convert k h)
+   convert' :: E prim (c :=> d) -> ((a :* c) `k` d)
+   convert' h = uncurry (convert h p)
 
+#else
+
+infixl 9 @@
+infixr 2 ||||
+
+class HasLambda e where
+  type PrimT e :: * -> *
+  constL :: PrimT e a -> e a
+  varL   :: V a -> e a
+  (@@)   :: e (a :=> b) -> e a -> e b
+  lamL   :: Pat a -> e b -> e (a :=> b)
+  (||||) :: e (a -> c) -> e (b -> c) -> e (a :+ b -> c)
+
+instance HasLambda (E p) where
+  type PrimT (E p) = p
+  constL = ConstE
+  varL   = Var
+  (@@)   = (:^)
+  lamL   = Lam
+  (||||) = Either
+
+-- | Generation of CCC terms in a binding context
+newtype MkC prim b =
+  MkC { unMkC :: forall a k. BiCCCC k prim => Pat a -> (a `k` b) }
+
+instance HasLambda (MkC prim) where
+  type PrimT (MkC prim) = prim
+  constL x         = MkC (\ _ -> unitArrow x . it)
+  varL y           = MkC (\ p -> convertVar y p)
+  MkC u @@ MkC v   = MkC (\ p -> apply . (u p &&& v p))
+  lamL q (MkC u)   = MkC (\ p -> curry (u (p :# q)))
+  MkC f |||| MkC g =
+    MkC (\ p -> curry ((uncurry (f p) ||| uncurry (g p)) . distl))
+
+-- | Convert from 'E' to another 'HasLambda' with the same primitives:
+convert :: HasLambda ex => E (PrimT ex) b -> ex b
+convert (ConstE o)   = constL o
+convert (Var v)      = varL v
+convert (s :^ t)     = convert s @@ convert t
+convert (Lam p e)    = lamL p (convert e)
+convert (Either f g) = convert f |||| convert g
+
+-- | Rewrite a lambda expression via CCC combinators
+toCCC :: BiCCCC k p => E p a -> (Unit `k` a)
+toCCC e = unMkC (convert e) UnitPat
+
+-- A universal instance of 'HasLambda', with 'PrimT' @p@.
+newtype Lambda p a = L (forall f . (HasLambda f, PrimT f ~ p) => f a)
+
+instance HasLambda (Lambda p) where
+  type PrimT (Lambda p) = p
+  constL o     = L (constL o)
+  varL x       = L (varL x)
+  L u @@ L v   = L (u @@ v)
+  lamL p (L u) = L (lamL p u)
+  L f |||| L g = L (f |||| g)
+
+#endif
+
+-- | Variant on 'toCCC'
+toCCC' :: BiCCCC k p => E p (a :=> b) -> (a `k` b)
+toCCC' = unUnitFun . toCCC
+
+-- toCCC' :: forall p a b. E p (a :=> b) -> forall k. BiCCCC k p => (a `k` b)
+
+-- TODO: Handle constants in a generic manner, so we can drop the constraint that k ~ (:->).
+
+-- convert k (Case (a,p) (b,q) ab) =
+--   (convert (k :# a) p ||| convert (k :# b) q) . ldistribS . (Id &&& convert k ab)
 
 -- Convert a variable in context
-convertVar :: forall b a. HasTy2 a b => V b -> Pat a -> Maybe (a :-> b)
-convertVar u = conv
+convertVar :: forall b a k. ProductCat k =>
+              V b -> Pat a -> (a `k` b)
+convertVar u = fromMaybe (error $ "convert: unbound variable: " ++ show u) .
+               conv
  where
-   conv :: forall c. HasTy2 c b => Pat c -> Maybe (c :-> b)
-   conv (VarPat v) | Just Refl <- v `tyEq` u = Just Id
-                   | otherwise               = Nothing
+   conv :: forall c. Pat c -> Maybe (c `k` b)
+   conv (VarPat v) | Just Refl <- v ===? u = Just id
+                   | otherwise             = Nothing
    conv UnitPat  = Nothing
-   conv (p :# q) | (HasTy,HasTy) <- tyHasTy2 (patTy p) (patTy q)
-                 = ((@. Exr) <$> conv q) `mplus` ((@. Exl) <$> conv p)
+   conv (p :# q) = ((. exr) <$> conv q) `mplus` ((. exl) <$> conv p)
    conv (p :@ q) = conv q `mplus` conv p
-
--- Alternatively,
--- 
---    conv (p :# q) = descend Exr q `mplus` descend Exl p
---     where
---       descend :: (c :-> d) -> Pat d -> Maybe (c :-> b)
---       descend sel r = (@. sel) <$> conv r
 
 -- Note that we try q before p. This choice cooperates with uncurrying and
 -- shadowing.
+
+-- Alternatively,
+-- 
+--    conv (p :# q) = descend exr q `mplus` descend exl p
+--     where
+--       descend :: (c `k` d) -> Pat d -> Maybe (c `k` b)
+--       descend sel r = (. sel) <$> conv r
+

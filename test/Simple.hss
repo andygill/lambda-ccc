@@ -1,7 +1,18 @@
 -- HERMIT script for Tests.hs
 
--- { rhs-of 'halfAddH ; bash }
+-- { rhs-of 'swap ; bash }
 
-reify-named 'halfAddH
+-- set-pp-type Show
+-- set-pp-type Hide
+-- set-pp-type Omit
 
--- consider 'halfAddH
+binding-of zoot
+reify-def
+any-td reify-misc
+
+-- reify-named bar
+
+-- rhs-of main
+-- rhs-of bar
+-- binding-of bar
+-- binding-of bar_reified

@@ -1,7 +1,7 @@
 {-# LANGUAGE TypeOperators, TypeFamilies, GADTs, KindSignatures, CPP #-}
 {-# LANGUAGE PatternGuards, ViewPatterns, ConstraintKinds #-}
 {-# LANGUAGE ExistentialQuantification, ScopedTypeVariables #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleContexts, MultiParamTypeClasses #-}
 {-# OPTIONS_GHC -Wall #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
@@ -21,31 +21,26 @@
 
 module LambdaCCC.CCC
   ( module LambdaCCC.Misc
-  , (:->)(..)
-  , (@.), applyE, curryE, uncurryE      -- TODO: "E" --> "C"
-  , prim
-  , (&&&), (***), (+++), (|||)
-  , twiceP, twiceC
-  , dup, jam, swapP, swapC
-  , first, second, left, right, distl
-  , cccTys
+  , (:->)(..), prim
+  , convertC
   ) where
 
+import Prelude hiding (id,(.),not,and,or,curry,uncurry,const)
 import qualified Control.Arrow as A
 -- import Control.Applicative (liftA3)
 
 import Data.IsTy
 import Data.Proof.EQ
 
-import LambdaCCC.Misc (Unop,Evalable(..),(:*),(:+),(:=>))
+import LambdaCCC.Misc (Unop,Evalable(..),Unit,(:*),(:+),(:=>),Eq'(..),(==?))
 import LambdaCCC.ShowUtils (showsApp1,showsOp2',Assoc(..))
-import LambdaCCC.Ty
-import LambdaCCC.Prim (Prim(..)) -- ,cond,ifThenElse
+-- import LambdaCCC.Ty
+import LambdaCCC.Prim (Prim(..),Lit(..)) -- ,cond,ifThenElse
+
+import Circat.Category
+import Circat.Classes
 
 infix  0 :->
-infixr 3 &&&, ***
-infixr 2 |||, +++
-infixr 9 :.
 
 infixr 3 :&&&
 infixr 2 :|||
@@ -54,57 +49,55 @@ infixr 2 :|||
 #define Sugared
 
 -- Whether to simplify during construction
--- #define Simplify
+#define Simplify
 
 -- | CCC combinator expressions. Although we use standard Haskell unit,
 -- cartesian product, sums, and function types here, the intended interpretation
 -- is as the categorical counterparts (terminal object, categorical products,
 -- coproducts, and exponentials).
 data (:->) :: * -> * -> * where
-  Id      :: HasTy a => a :-> a
-  (:.)    :: HasTy3 a b c => (b :-> c) -> (a :-> b) -> (a :-> c)
+  Id      :: a :-> a
+  (:.)    :: (b :-> c) -> (a :-> b) -> (a :-> c)
   -- Products
-  Exl     :: HasTy2 (a :* b) a => a :* b :-> a
-  Exr     :: HasTy2 (a :* b) b => a :* b :-> b
-  (:&&&)  :: HasTy3 a b c => (a :-> b) -> (a :-> c) -> (a :-> b :* c)
+  Exl     :: a :* b :-> a
+  Exr     :: a :* b :-> b
+  (:&&&)  :: (a :-> b) -> (a :-> c) -> (a :-> b :* c)
+  It      :: a :-> Unit
   -- Coproducts
-  Inl     :: HasTy2 a b => a :-> a :+ b
-  Inr     :: HasTy2 a b => b :-> a :+ b
-  (:|||)  :: HasTy3 a b c => (b :-> a) -> (c :-> a) -> (b :+ c :-> a)
-  DistL   :: HasTy3 a b c => a :* (b :+ c) :-> a :* b :+ a :* c
+  Inl     :: a :-> a :+ b
+  Inr     :: b :-> a :+ b
+  (:|||)  :: (b :-> a) -> (c :-> a) -> (b :+ c :-> a)
+  DistL   :: a :* (b :+ c) :-> a :* b :+ a :* c
   -- Exponentials
-  Apply   :: HasTy2 a b   => (a :=> b) :* a :-> b
-  Curry   :: HasTy3 a b c => (a :* b :-> c) -> (a :-> (b :=> c))
-  Uncurry :: HasTy3 a b c => (a :-> (b :=> c)) -> (a :* b :-> c)
+  Apply   :: (a :=> b) :* a :-> b
+  Curry   :: (a :* b :-> c) -> (a :-> (b :=> c))
+  Uncurry :: (a :-> (b :=> c)) -> (a :* b :-> c)
   -- Primitives
-  Prim    :: HasTy2 a b => Prim (a -> b) -> (a :-> b)
-  Const   :: HasTy2 a b => Prim       b  -> (a :-> b)
-
--- TODO: Do we really need both Prim and Const?
+  Prim    :: Prim (a :=> b) -> (a :-> b)
+  Lit     :: Lit b -> (a :-> b)
 
 -- TODO: Try to make instances for the Category subclasses, so we don't need
 -- separate terminology. Then eliminate dup, jam, etc.
 
-instance IsTy2 (:->) where
-  type IsTy2Constraint (:->) u v = HasTy2 u v
-  tyEq2 = tyEq2'
+instance Eq' (a :-> b) (c :-> d) where
+  Id         === Id           = True
+  (g :. f)   === (g' :. f')   = g === g' && f === f'
+  Exl        === Exl          = True
+  Exr        === Exr          = True
+  (f :&&& g) === (f' :&&& g') = f === f' && g === g'
+  Inl        === Inl          = True
+  Inr        === Inr          = True
+  (f :||| g) === (f' :||| g') = f === f' && g === g'
+  DistL      === DistL        = True
+  Apply      === Apply        = True
+  Curry h    === Curry h'     = h === h'
+  Uncurry k  === Uncurry k'   = k === k'
+  Prim p     === Prim p'      = p === p'
+  Lit l      === Lit l'       = l === l'
+  _          === _            = False
 
-instance HasTy2 a b => Eq (a :-> b) where
-  Id         == Id                                     = True
-  (g :. f)   == (g' :. f') | Just Refl <- f `tyEq2` f' = g == g'
-  Exl        == Exl                                    = True
-  Exr        == Exr                                    = True
-  (f :&&& g) == (f' :&&& g')                           = f == f' && g == g'
-  Inl        == Inl                                    = True
-  Inr        == Inr                                    = True
-  (f :||| g) == (f' :||| g')                           = f == f' && g == g'
-  DistL      == DistL                                  = True
-  Apply      == Apply                                  = True
-  Curry h    == Curry h'                               = h == h'
-  Uncurry k  == Uncurry k'                             = k == k'
-  Prim  p    == Prim  p'                               = p == p'
-  Const p    == Const p'                               = p == p'
-  _          == _                                      = False
+instance Eq (a :-> b) where (==) = (===)
+
 
 -- WARNING: take care with the (==) definition above. When we add constructors
 -- to the GADT, we won't get a non-exhaustive cases warning, since the last case
@@ -114,45 +107,32 @@ instance HasTy2 a b => Eq (a :-> b) where
 -- some change to those classes, e.g., with instance-specific constraints via
 -- ConstraintKinds.
 
-typ2 :: HasTy2 a b => (Ty a, Ty b)
-typ2 = (typ,typ)
-
-cccTys :: (a :-> b) -> (Ty a, Ty b)
-cccTys Id      {} = typ2
-cccTys (:.)    {} = typ2
-cccTys Exl     {} = typ2
-cccTys Exr     {} = typ2
-cccTys (:&&&)  {} = typ2
-cccTys Inl     {} = typ2
-cccTys Inr     {} = typ2
-cccTys (:|||)  {} = typ2
-cccTys DistL   {} = typ2
-cccTys Apply   {} = typ2
-cccTys Curry   {} = typ2
-cccTys Uncurry {} = typ2
-cccTys Prim    {} = typ2
-cccTys Const   {} = typ2
-
 -- Maybe parametrize this GADT by a constraint. Sadly, I'd lose the pretty infix
 -- syntax ("a :-> b").
 
 -- Homomorphic evaluation
+#if 0
 instance Evalable (a :-> b) where
   type ValT (a :-> b) = a :=> b
-  eval Id           = id
-  eval (g :. f)     = eval g . eval f
-  eval (Prim p)     = eval p
-  eval (Const p)    = const (eval p)
-  eval Exl          = fst
-  eval Exr          = snd
-  eval (f :&&& g)   = eval f A.&&& eval g
-  eval Inl          = Left
-  eval Inr          = Right
-  eval (f :||| g)   = eval f A.||| eval g
-  eval DistL        = distlF
-  eval Apply        = uncurry ($)
-  eval (Curry   h)  = curry   (eval h)
-  eval (Uncurry f)  = uncurry (eval f)
+  eval Id          = id
+  eval (g :. f)    = eval g . eval f
+  eval (Prim p)    = eval p
+  eval (Lit l)     = const (eval l)
+  eval Exl         = fst
+  eval Exr         = snd
+  eval (f :&&& g)  = eval f A.&&& eval g
+  eval Inl         = Left
+  eval Inr         = Right
+  eval (f :||| g)  = eval f A.||| eval g
+  eval DistL       = distlF
+  eval Apply       = uncurry ($)
+  eval (Curry   h) = curry   (eval h)
+  eval (Uncurry f) = uncurry (eval f)
+#else
+instance Evalable (a :-> b) where
+  type ValT (a :-> b) = a -> b
+  eval = convertC
+#endif
 
 distlF :: a :* (b :+ c) -> a :* b :+ a :* c
 distlF (a, Left  b) = Left  (a,b)
@@ -163,52 +143,49 @@ distlF (a, Right c) = Right (a,c)
     Smart constructors
 --------------------------------------------------------------------}
 
-prim :: HasTy2 a b => Prim (a -> b) -> (a :-> b)
+prim :: Prim (a -> b) -> (a :-> b)
 prim ExlP = Exl
 prim ExrP = Exr
--- prim InlP = Inl
--- prim InrP = Inr
+prim InlP = Inl
+prim InrP = Inr
 prim p    = Prim p
 
--- Oops:
+instance Category (:->) where
+  id  = Id
+  -- | Optimizing morphism composition
+# ifdef Simplify
+  Id         . f                   = f
+  g          . Id                  = g
+  (h :. g)   . f                   = h . (g . f)
+  Exl        . (f :&&& _)          = f
+  Exr        . (_ :&&& g)          = g
+  It          . _                  = it
+  (f :||| _) . Inl                 = f
+  (_ :||| g) . Inr                 = g
+  Lit l      . _                   = Lit l
+  Apply      . (decompL -> g :. f) = composeApply g . f
+  -- Experiment. To do: prove
+  Curry (decompR -> f :. Exr) . _ = curry (f . exr)
+# endif
+  g          . f                   = g :. f
+
+-- To prove:
 -- 
---     Could not deduce (HasTy b1) arising from a use of `Inl'
---     from the context (HasTy2 a b)
+--   curry (f . exr) . g == curry (f . exr)
 
--- TODO: Try adding HasTy constraints to the Prim constructors. Then add a
--- primTy function, and remove the Ty argument from the ConstE constructor in E.
-
-infixr 9 @.
--- | Optimizing morphism composition
-(@.) :: HasTy3 a b c => (b :-> c) -> (a :-> b) -> (a :-> c)
-#ifdef Simplify
-Id         @. f                   = f
-g          @. Id                  = g
-(h :. g)   @. f                   = h @. (g @. f)
-Exl        @. (f :&&& _)          = f
-Exr        @. (_ :&&& g)          = g
-(f :||| _) @. Inl                 = f
-(_ :||| g) @. Inr                 = g
-Const p    @. _                   = Const p
-Apply      @. (decompL -> g :. f) = composeApply g @. f
-#endif
-g          @. f                   = g :. f
-
---  Apply    :: HasTy2 a b   => ((a :=> b) :* a) :-> b
 
 #ifdef Simplify
 
 -- | @'composeApply' h == 'apply' . h@
-composeApply :: HasTy3 a b z => (z :-> (a :=> b) :* a) -> (z :-> b)
-composeApply (Const p :&&& f) = prim p @. f
+composeApply :: (z :-> (a :=> b) :* a) -> (z :-> b)
 -- apply . (curry h . f &&& g) == h . (f &&& g)
-composeApply ((decompL -> (Curry h :. f)) :&&& g) = h @. (f &&& g)
-composeApply (h@Prim{} :. f    :&&& g) = uncurryE h @. (f  &&& g)
-composeApply (h@Prim{}         :&&& g) = uncurryE h @. (Id &&& g)
+composeApply ((decompL -> (Curry h :. f)) :&&& g) = h . (f &&& g)
+composeApply (h@Prim{} :. f    :&&& g) = uncurry h . (f  &&& g)
+composeApply (h@Prim{}         :&&& g) = uncurry h . (Id &&& g)
 -- apply . (curry (g . exr) &&& f) == g . f
-composeApply (Curry (decompR -> g :. Exr) :&&& f) = g @. f
+composeApply (Curry (decompR -> g :. Exr) :&&& f) = g . f
 -- apply . first f == uncurry f  -- see proof below
-composeApply (f :. Exl :&&& Exr) = uncurryE f
+composeApply (f :. Exl :&&& Exr) = uncurry f
 composeApply h = Apply :. h
 
 #endif
@@ -228,72 +205,44 @@ composeApply h = Apply :. h
 -- Note: the second Uncurry specializes the first one, but is needed for
 -- syntactic matching.
 
-dup :: HasTy a => a :-> a :* a
-dup = Id &&& Id
+instance ProductCat (:->) where
+  exl = Exl
+  exr = Exr
+# ifdef Simplify
+  -- Experimental: const a &&& const b == const (a,b)
+  -- Prim (ConstP (LitP a)) &&& Prim (ConstP (LitP b)) = Prim (ConstP (LitP (a,b)))
+  Exl &&& Exr = Id
+  -- f . r &&& g . r == (f &&& g) . r
+  (decompR -> f :. r) &&& (decompR -> g :. r') | Just Refl <- r ==? r'
+                                               = (f &&& g) . r
+# endif
+  f &&& g = f :&&& g
 
-jam :: HasTy a => a :+ a :-> a
-jam = Id ||| Id
+instance TerminalCat (:->) where
+  it = It
 
--- | Product swap
-swapP :: HasTy2 a b => a :* b :-> b :* a
-swapP = Exr &&& Exl
+instance CoproductCat (:->) where
+  inl   = Inl
+  inr   = Inr
+  (|||) = (:|||)                            -- no rewrites?
 
--- | Coproduct swap
-swapC :: HasTy2 a b => a :+ b :-> b :+ a
-swapC = Inr ||| Inl
+instance DistribCat (:->) where
+  distl = DistL
+  distr = (swapP +++ swapP) . distl . swapP -- maybe move to default.
 
-(&&&) :: HasTy3 a c d => (a :-> c) -> (a :-> d) -> (a :-> c :* d)
-#ifdef Simplify
--- Experimental: const a &&& const b == const (a,b)
--- Prim (ConstP (LitP a)) &&& Prim (ConstP (LitP b)) = Prim (ConstP (LitP (a,b)))
-Exl &&& Exr = Id
--- f . r &&& g . r == (f &&& g) . r
-(decompR -> f :. r) &&& (decompR -> g :. (tyEq2 r -> Just Refl)) =
-  (f &&& g) @. r
-#endif
-f &&& g = f :&&& g
-
-(***) :: HasTy4 a b c d => (a :-> c) -> (b :-> d) -> (a :* b :-> c :* d)
-f *** g = f @. Exl &&& g @. Exr
-
-twiceP :: HasTy2 a   c   => (a :-> c)              -> (a :* a :-> c :* c)
-twiceP f = f *** f
-
-first :: HasTy3 a b c => (a :-> c) -> (a :* b :-> c :* b)
-first f = f *** Id
-
-second :: HasTy3 a b d => (b :-> d) -> (a :* b :-> a :* d)
-second g = Id *** g
-
-(|||) :: HasTy3 a b c => (a :-> c) -> (b :-> c) -> (a :+ b :-> c)
-(|||) = (:|||)
-
-(+++) :: HasTy4 a b c d => (a :-> c) -> (b :-> d) -> (a :+ b :-> c :+ d)
-f +++ g = Inl @. f ||| Inr @. g
-
-twiceC :: HasTy2 a   c   => (a :-> c)              -> (a :+ a :-> c :+ c)
-twiceC f = f +++ f
-
-left :: HasTy3 a b c => (a :-> c) -> (a :+ b :-> c :+ b)
-left f = f +++ Id
-
-right :: HasTy3 a b d => (b :-> d) -> (a :+ b :-> a :+ d)
-right g = Id +++ g
-
-distl :: HasTy3 a b c => a :* (b :+ c) :-> a :* b :+ a :* c
-distl = DistL
-
-applyE :: HasTy2 a b   => ((a :=> b) :* a) :-> b
-applyE = Apply
-
-curryE :: HasTy3 a b c => (a :* b :-> c) -> (a :-> (b :=> c))
-#ifdef Simplify
-curryE (Uncurry h) = h
-curryE (Prim p :. Exr) = Const p   -- FIX: not general enough
--- curry (apply . (f . exl &&& exr)) == f  -- Proof below
--- curryE (Apply :. (f :. Exl :&&& Exr)) = f
-#endif
-curryE h = Curry h
+instance ClosedCat (:->) where
+  apply = Apply
+# ifdef Simplify
+  curry (Uncurry h) = h
+  -- curry (apply . (f . exl &&& exr)) == f  -- Proof below
+  -- curry (Apply :. (f :. Exl :&&& Exr)) = f
+# endif
+  curry h = Curry h
+# ifdef Simplify
+  uncurry (Curry f)    = f
+  uncurry (Prim PairP) = Id
+# endif
+  uncurry x = Uncurry x
 
 -- curry/apply proof:
 -- 
@@ -309,13 +258,6 @@ curryE h = Curry h
 -- I commented out this rule. I don't think it'll ever fire, considering
 -- composeApply.
 
-uncurryE :: HasTy3 a b c => (a :-> (b :=> c)) -> (a :* b :-> c)
-#ifdef Simplify
-uncurryE (Curry f)    = f
-uncurryE (Prim PairP) = Id
-#endif
-uncurryE x = Uncurry x
-
 {--------------------------------------------------------------------
     Factoring (decomposition)
 --------------------------------------------------------------------}
@@ -323,16 +265,16 @@ uncurryE x = Uncurry x
 #if defined Simplify || defined Sugared
 
 -- | Decompose into @g . f@, where @g@ is as small as possible, but not 'Id'.
-decompL :: HasTy2 a c => Unop (a :-> c)
+decompL :: Unop (a :-> c)
 decompL Id                         = Id
-decompL ((decompL -> h :. g) :. f) = h :. (g @. f)
+decompL ((decompL -> h :. g) :. f) = h :. (g . f)
 decompL comp@(_ :. _)              = comp
 decompL f                          = f :. Id
 
 -- | Decompose into @g . f@, where @f@ is as small as possible, but not 'Id'.
-decompR :: HasTy2 a c => Unop (a :-> c)
+decompR :: Unop (a :-> c)
 decompR Id                         = Id
-decompR (h :. (decompR -> g :. f)) = (h @. g) :. f
+decompR (h :. (decompR -> g :. f)) = (h . g) :. f
 decompR comp@(_ :. _)              = comp
 decompR f                          = Id :. f
 
@@ -349,14 +291,14 @@ instance Show (a :-> b) where
   showsPrec p ((decompR -> f :. Exl) :&&& (decompR -> g :. Exr))
     | Id        <- g           = showsApp1 "first"  p f
     | Id        <- f           = showsApp1 "second" p g
-    | Just Refl <- f `tyEq2` g = showsApp1 "twiceP" p f
+    | f === g                 = showsApp1 "twiceP" p f
     | otherwise                = showsOp2'  "***" (3,AssocRight) p f g
   showsPrec _ (Id  :||| Id )   = showString "jam"
   showsPrec _ (Inr :||| Inl)   = showString "swapC"
   showsPrec p (f :. Exl :||| g :. Exr)
     | Id        <- g           = showsApp1 "left"  p f
     | Id        <- f           = showsApp1 "right" p g
-    | Just Refl <- f `tyEq2` g = showsApp1 "twiceC" p f
+    | f === g                  = showsApp1 "twiceC" p f
     | otherwise                = showsOp2'  "+++" (2,AssocRight) p f g
 #endif
   showsPrec _ Id          = showString "id"
@@ -364,6 +306,7 @@ instance Show (a :-> b) where
   showsPrec _ Exl         = showString "exl"
   showsPrec _ Exr         = showString "exr"
   showsPrec p (f :&&& g)  = showsOp2' "&&&" (3,AssocRight) p f g
+  showsPrec _ It          = showString "it"
   showsPrec _ Inl         = showString "inl"
   showsPrec _ Inr         = showString "inr"
   showsPrec p (f :||| g)  = showsOp2' "|||" (2,AssocRight) p f g
@@ -373,4 +316,61 @@ instance Show (a :-> b) where
   showsPrec p (Uncurry h) = showsApp1  "uncurry" p h
   showsPrec p (Prim x)    = showsPrec p x
                             -- or: showsApp1 "prim" p x
-  showsPrec p (Const w)   = showsApp1 "const" p w
+  showsPrec p (Lit l)     = showsApp1 "const" p l
+
+
+-- -- | Category with boolean operations.
+-- class ProductCat k => BoolCat k where
+--   not :: Bool `k` Bool
+--   and, or, xor :: (Bool :* Bool) `k` Bool
+
+-- prim :: Prim (a -> b) -> (a :-> b)
+
+instance BoolCat (:->) where
+  not = prim NotP
+  xor = uncurry (prim XorP)
+  and = uncurry (prim AndP)
+  or  = uncurry (prim OrP)
+
+-- etc.
+
+-- TODO: reconcile curried vs uncurried, eliminating the conversions here.
+
+{--------------------------------------------------------------------
+    Experiment: convert to other CCC
+--------------------------------------------------------------------}
+
+convertC :: (BiCCC k, BoolCat k, HasUnitArrow k Lit) =>
+            (a :-> b) -> (a `k` b)
+convertC Id           = id
+convertC (g :. f)     = convertC g . convertC f
+convertC (Prim p)     = convertP p
+convertC (Lit l)      = unitArrow l . it
+convertC Exl          = exl
+convertC Exr          = exr
+convertC (f :&&& g)   = convertC f &&& convertC g
+convertC It           = it
+convertC Inl          = inl
+convertC Inr          = inr
+convertC (f :||| g)   = convertC f ||| convertC g
+convertC DistL        = distl
+convertC Apply        = apply
+convertC (Curry   h)  = curry   (convertC h)
+convertC (Uncurry f)  = uncurry (convertC f)
+
+convertP :: (BiCCC k, BoolCat k) =>
+            Prim (a :=> b) -> (a `k` b)
+convertP NotP  = not
+convertP AndP  = curry and
+convertP OrP   = curry or
+convertP XorP  = curry xor
+convertP ExlP  = exl
+convertP ExrP  = exr
+convertP PairP = curry id
+convertP InlP  = inl
+convertP InrP  = inr
+-- convertP CondP = condC
+-- convertP AddP  = curry (namedC "add")
+convertP p     = error $ "convertP: not yet handled: " ++ show p
+
+instance HasUnitArrow (:->) Lit where unitArrow = Lit

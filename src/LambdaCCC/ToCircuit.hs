@@ -25,9 +25,8 @@ module LambdaCCC.ToCircuit
 import Prelude hiding (id,(.),not,and,or,curry,uncurry)
 import Data.Constraint (Dict(..))
 
-import LambdaCCC.Ty
 import LambdaCCC.Prim hiding (xor)
-import LambdaCCC.CCC hiding ((&&&),(|||),second,(***))
+import LambdaCCC.CCC
 import LambdaCCC.Lambda (E)
 import LambdaCCC.ToCCC (toCCC)
 
@@ -35,36 +34,35 @@ import Circat.Circuit
 import Circat.Category
 import Circat.Classes
 
-expToCircuit :: HasTy2 a b => E (a -> b) -> (a :> b)
+expToCircuit :: E Prim (a -> b) -> (a :> b)
 expToCircuit = cccToCircuit . toCCC
 
 #define TS (tyPSource -> Dict)
 #define CP (cccPS -> (Dict, Dict))
 #define TC (tyHasCond -> Dict)
 
+#define LS (litSS -> Dict)
+
 cccToCircuit :: (a :-> b) -> (a :> b)
 
 -- Category
-cccToCircuit Id                 = id
-cccToCircuit (g :. f)           = cccToCircuit g . cccToCircuit f
+cccToCircuit Id              = id
+cccToCircuit (g :. f)        = cccToCircuit g . cccToCircuit f
 -- Primitives
-cccToCircuit (Prim p)           = primToSource p
-cccToCircuit k@(Const (LitP b)) | CP <- k
-                                = constC b
-cccToCircuit (Const p)          = constS (primToSource p) -- Combine
+cccToCircuit (Prim p)        = primToSource p
+cccToCircuit (Lit l@LS)      = constC (eval l)
 -- Product
-cccToCircuit Exl                = exl
-cccToCircuit Exr                = exr
-cccToCircuit (f :&&& g)         = cccToCircuit f &&& cccToCircuit g
+cccToCircuit Exl             = exl
+cccToCircuit Exr             = exr
+cccToCircuit (f :&&& g)      = cccToCircuit f &&& cccToCircuit g
 -- Coproduct
-cccToCircuit Inl                = inl
-cccToCircuit Inr                = inr
-cccToCircuit k@(f :||| g)       | (_, TC) <- cccTys k
-                                = cccToCircuit f |||* cccToCircuit g
+cccToCircuit Inl             = inl
+cccToCircuit Inr             = inr
+-- cccToCircuit k@(f :||| g) = cccToCircuit f |||* cccToCircuit g
 -- Exponential
-cccToCircuit Apply              = apply
-cccToCircuit (Curry h)          = curry (cccToCircuit h)
-cccToCircuit (Uncurry h)        = uncurry (cccToCircuit h)
+cccToCircuit Apply           = apply
+cccToCircuit (Curry h)       = curry (cccToCircuit h)
+cccToCircuit (Uncurry h)     = uncurry (cccToCircuit h)
 
 cccToCircuit ccc = error $ "cccToCircuit: not yet handled: " ++ show ccc
 
@@ -77,30 +75,29 @@ cccToCircuit ccc = error $ "cccToCircuit: not yet handled: " ++ show ccc
 -- could even use this PrimC type in circat, though it'd be the first dependency
 -- of circat on lambda-ccc.
 
--- Prove that IsSource (Pins a), IsSource (Pins b)
-cccPS :: (a :-> b) -> (PSourceJt a, PSourceJt b)
-cccPS = tyPSource2 . cccTys
-
 {--------------------------------------------------------------------
     Prim conversion
 --------------------------------------------------------------------}
 
-primToSource :: forall t. HasTy t => Prim t -> Pins t
-primToSource = flip toS typ
- where
-   toS :: Prim t -> Ty t -> Pins t
-   toS NotP  _                = not
-   toS AndP  _                = curry and
-   toS OrP   _                = curry or
-   toS XorP  _                = curry xor
-   toS ExlP  _                = exl
-   toS ExrP  _                = exr
-   toS PairP _                = curry id
-   toS InlP  _                = inl
-   toS InrP  _                = inr
-   toS CondP (_ :=> TC)       = condC
-   toS AddP  (_ :=> _ :=> TS) = curry (namedC "add")
-   toS p _                    = error $ "primToSource: not yet handled: " ++ show p
+primToSource :: Prim t -> Pins t
+primToSource NotP  = not
+primToSource AndP  = curry and
+primToSource OrP   = curry or
+primToSource XorP  = curry xor
+primToSource ExlP  = exl
+primToSource ExrP  = exr
+primToSource PairP = curry id
+primToSource InlP  = inl
+primToSource InrP  = inr
+-- primToSource CondP = condC
+-- primToSource AddP  = curry (namedC "add")
+primToSource p     = error $ "primToSource: not yet handled: " ++ show p
+
+#if 0
+
+-- Prove that IsSource (Pins a), IsSource (Pins b)
+cccPS :: (a :-> b) -> (PSourceJt a, PSourceJt b)
+cccPS = tyPSource2 . cccTys
 
 {--------------------------------------------------------------------
     Proofs
@@ -131,3 +128,5 @@ tyHasCond (TC :* TC) = Dict
 tyHasCond (_  :+ _ ) = Dict
 tyHasCond (_ :=> TC) = Dict
 tyHasCond Int  = error "tyHasCond: Int not yet handled."
+
+#endif
